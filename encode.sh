@@ -5,12 +5,46 @@ DIR=$(dirname "${@: -1}")
 FILE=$(basename "${@: -1}")
 # Default params
 HEIGHT=1
-OGG=1
-MP4=1
-WEBM=1
+OGG=0
+MP4=0
+WEBM=0
 
 # Go into the directory so the container will work locally
 cd $DIR
+
+args=`getopt h:omw $*`
+# you should not use `getopt abo: "$@"` since that would parse
+# the arguments differently from what the set command below does.
+if [ $? != 0 ]; then
+  echo 'Usage: encode.sh [options] video_path'
+  exit 2
+fi
+set -- $args
+# You cannot use the set command with a backquoted getopt directly,
+# since the exit code from getopt would be shadowed by those of set,
+# which is zero by definition.
+for i; do
+  case "$i" in
+    -h)
+      HEIGHT="$2"; shift;
+      shift;;
+    -o)
+      OGG=1;
+      shift;;
+    -m)
+      MP4=1;
+      shift;;
+    -w)
+      WEBM=1;
+      shift;;
+    --)
+      shift; break;;
+  esac
+done
+
+if [ "$OGG" = "$WEBM" ] && [ "$OGG" = "$MP4" ]; then
+  OGG=1; WEBM=1; MP4=1;
+fi
 
 # Temporarily install the actual encode script
 # Gets "mounted into" the container with FFMPEG and tackles all the real encoding
