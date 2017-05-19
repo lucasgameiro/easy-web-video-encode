@@ -1,8 +1,13 @@
 #!/bin/bash
 
 # Get the directory and filename
-DIR=$(dirname "$1")
-FILE=$(basename "$1")
+DIR=$(dirname "${@: -1}")
+FILE=$(basename "${@: -1}")
+# Default params
+HEIGHT=1
+OGG=1
+MP4=1
+WEBM=1
 
 # Go into the directory so the container will work locally
 cd $DIR
@@ -10,10 +15,9 @@ cd $DIR
 # Temporarily install the actual encode script
 # Gets "mounted into" the container with FFMPEG and tackles all the real encoding
 cat <<'EOF' > encode-inner.sh
-IN=$1
-OUT=$(echo $1 | sed 's/^\(.*\)\.[a-zA-Z0-9]*$/\1/')
-
-echo "--- Encoding: $1"
+IN=$5
+OUT=$(echo $5 | sed 's/^\(.*\)\.[a-zA-Z0-9]*$/\1/')
+echo "--- Encoding: $5"
 
 # We need to detect whether the video is rotated or not in order to
 # set the "scale" factor correctly, otherwise we can hit a fatal error
@@ -21,21 +25,33 @@ echo "--- Encoding: $1"
 # just need to ensure the scale is right, not also apply rotation.
 ROTATION=$(ffprobe $IN 2>&1 | \grep rotate | awk '{print $3}')
 if [ "$ROTATION" == "" ]; then
-    # No rotation, use normal scale (height 720, width auto)
-    VF="scale=-1:720"
-    echo "--- No rotation detected"
+    # No rotation, use normal scale
+    if [ "$1" = 1 ]; then
+      VF="scale=-1:ih"
+    else
+      VF="scale=-1:$1"
+      echo "--- No rotation detected"
+    fi
 else
     # Rotated video; we need to specify the scale the other way around
     # to avoid a fatal "width not divisible by 2 (405x720)" error
-    # Instead we'll use (height auto, width 720)
-    VF="scale=720:-1"
+    # Instead we'll use 
+    if [ "$1" = 1 ]; then
+      VF="scale=iw:-1"
+    else
+      VF="scale=$1:-1"
+    fi
     echo "--- Rotation detected; changed scale param"
 fi
 
 # Sometimes you need to force this if, for example, your video is sideways but doesn't contain that meta data
 if [ "$FORCE" == "1" ]; then
     echo "!!! Forced scale + rotation"
-    VF="scale=-1:720,transpose=2"
+    if [ "$1" -eq 1 ]; then
+      VF="scale=-1:ih,transpose=2"
+    else
+      VF="scale=-1:$1,transpose=2"
+    fi
 fi
 
 # Count cores, more than one? Use many!
@@ -46,43 +62,58 @@ if [ "$CORES" -gt "1" ]; then
   CORES="$(($CORES - 1))"
 fi
 
-echo "--- Using $CORES threads for webm"
+if [ "$3" = 1 ]; then
+  echo "--- Using $CORES threads for webm"
+  
+  echo "--- webm, First Pass"
+  ffmpeg -i $IN \
+      -hide_banner -loglevel error -stats \
+      -codec:v libvpx -threads $CORES -slices 4 -quality good -cpu-used 0 -b:v 1000k -qmin 10 -qmax 42 -maxrate 1000k -bufsize 2000k -vf $VF \
+      -an \
+      -pass 1 \
+      -f webm \
+      -y /dev/null
+  
+  echo "--- webm, Second Pass"
+  ffmpeg -i $IN \
+      -hide_banner -loglevel error -stats \
+      -codec:v libvpx -threads $CORES -slices 4 -quality good -cpu-used 0 -b:v 1000k -qmin 10 -qmax 42 -maxrate 1000k -bufsize 2000k -vf $VF \
+      -codec:a libvorbis -b:a 128k \
+      -pass 2 \
+      -f webm \
+      -y ${OUT}_encoded.webm
+fi
 
-echo "--- webm, First Pass"
-ffmpeg -i $IN \
-    -hide_banner -loglevel error -stats \
-    -codec:v libvpx -threads $CORES -slices 4 -quality good -cpu-used 0 -b:v 1000k -qmin 10 -qmax 42 -maxrate 1000k -bufsize 2000k -vf $VF \
-    -an \
-    -pass 1 \
-    -f webm \
-    -y /dev/null
+if [ "$2" = 1 ]; then
+  
+  echo "--- x264, First Pass"
+  ffmpeg -i $IN \
+      -hide_banner -loglevel error -stats \
+      -codec:v libx264 -threads 0 -profile:v main -preset slow -b:v 1000k -maxrate 1000k -bufsize 2000k -vf $VF \
+      -an \
+      -pass 1 \
+      -f mp4 \
+      -y /dev/null
+  
+  echo "--- x264, Second Pass"
+  ffmpeg -i $IN \
+      -hide_banner -loglevel error -stats \
+      -codec:v libx264 -threads 0 -profile:v main -preset slow -b:v 1000k -maxrate 1000k -bufsize 2000k -vf $VF \
+      -codec:a libfdk_aac -b:a 128k \
+      -pass 2 \
+      -f mp4 \
+      -y ${OUT}_encoded.mp4
+fi
 
-echo "--- webm, Second Pass"
-ffmpeg -i $IN \
-    -hide_banner -loglevel error -stats \
-    -codec:v libvpx -threads $CORES -slices 4 -quality good -cpu-used 0 -b:v 1000k -qmin 10 -qmax 42 -maxrate 1000k -bufsize 2000k -vf $VF \
-    -codec:a libvorbis -b:a 128k \
-    -pass 2 \
-    -f webm \
-    -y $OUT.webm
-
-echo "--- x264, First Pass"
-ffmpeg -i $IN \
-    -hide_banner -loglevel error -stats \
-    -codec:v libx264 -threads 0 -profile:v main -preset slow -b:v 1000k -maxrate 1000k -bufsize 2000k -vf $VF \
-    -an \
-    -pass 1 \
-    -f mp4 \
-    -y /dev/null
-
-echo "--- x264, Second Pass"
-ffmpeg -i $IN \
-    -hide_banner -loglevel error -stats \
-    -codec:v libx264 -threads 0 -profile:v main -preset slow -b:v 1000k -maxrate 1000k -bufsize 2000k -vf $VF \
-    -codec:a libfdk_aac -b:a 128k \
-    -pass 2 \
-    -f mp4 \
-    -y $OUT.mp4
+if [ "$4" = 1 ]; then
+  echo "--- OGV, Single Pass"
+  ffmpeg -i $IN \
+      -hide_banner -loglevel error -stats \
+      -codec:v libtheora -threads $CORES -q:v 7 -vf $VF \
+      -codec:a libvorbis -b:a 128k \
+      -f ogv \
+      -y ${OUT}_encoded.ogv
+fi
 EOF
 
 # Run the container. Note that we set the workingdir to /tmp since there are a few cruft files
@@ -93,7 +124,7 @@ docker run -t --rm \
   -w /tmp \
   --entrypoint='bash' \
   jrottenberg/ffmpeg \
-  /app/encode-inner.sh /app/${FILE}
+  /app/encode-inner.sh $HEIGHT $MP4 $WEBM $OGG /app/${FILE}
 
 # Remove that temp script
 rm -f encode-inner.sh
